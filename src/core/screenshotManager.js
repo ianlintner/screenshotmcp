@@ -11,6 +11,7 @@ const { execSync, exec } = require('child_process');
 const sharp = require('sharp');
 const fs = require('fs-extra');
 const path = require('path');
+const windowDetection = require('./windowDetection');
 
 // Directory to store screenshots
 const SCREENSHOT_DIR = path.join(__dirname, '../../screenshots');
@@ -21,70 +22,10 @@ fs.ensureDirSync(SCREENSHOT_DIR);
 // Screenshot history storage
 const screenshotHistory = [];
 
-// Fallback for 'node-mac-window-list' using shell commands
+// Enhanced window listing function that uses multiple detection methods
 const getWindowList = async () => {
-  if (process.platform !== 'darwin') {
-    throw new Error('Window listing is only supported on macOS');
-  }
-  
-  return new Promise((resolve, reject) => {
-    // Use AppleScript to get window information
-    const script = `
-      tell application "System Events"
-        set windowList to {}
-        set allProcesses to processes whose visible is true
-        repeat with proc in allProcesses
-          set procName to name of proc
-          set procWindows to windows of proc
-          repeat with win in procWindows
-            set winName to ""
-            try
-              set winName to name of win
-            end try
-            if winName is not "" then
-              set end of windowList to {id:id of win, title:winName, app:procName}
-            end if
-          end repeat
-        end repeat
-        return windowList
-      end tell
-    `;
-    
-    exec(`osascript -e '${script}'`, (error, stdout, stderr) => {
-      if (error) {
-        console.error('Error getting window list:', error);
-        // Return empty list as fallback
-        resolve([]);
-        return;
-      }
-      
-      try {
-        // Parse the output into a structured format
-        const output = stdout.trim();
-        const windows = [];
-        
-        // Very basic parser for AppleScript output
-        // This is a simplified version and may need improvements
-        const entries = output.split(', {');
-        for (const entry of entries) {
-          const match = entry.match(/id:(\d+), title:(.+?), app:(.+?)(?:}|$)/);
-          if (match) {
-            windows.push({
-              id: match[1],
-              title: match[2].replace(/"/g, ''),
-              owner: { name: match[3].replace(/"/g, '') },
-              bounds: { x: 0, y: 0, width: 0, height: 0 } // Placeholder bounds
-            });
-          }
-        }
-        
-        resolve(windows);
-      } catch (err) {
-        console.error('Error parsing window list:', err);
-        resolve([]);
-      }
-    });
-  });
+  // Use our enhanced window detection module
+  return windowDetection.getWindowList();
 };
 
 /**
@@ -185,15 +126,25 @@ async function captureWindow(options = {}) {
     const filename = `window_${windowTitle.replace(/[^a-zA-Z0-9]/g, '_')}_${timestamp.replace(/[:.]/g, '-')}.${format}`;
     const filePath = saveToFile ? path.join(SCREENSHOT_DIR, filename) : null;
     
-    // On macOS, we'll use screencapture command directly for capturing a specific window
+    // On macOS, we'll use screencapture command
     if (process.platform === 'darwin') {
       try {
         // Create a temporary file path
         const tempFilePath = path.join(SCREENSHOT_DIR, `temp_${Date.now()}.png`);
         
-        // Execute screencapture command to capture the window by ID
-        // -l flag specifies the window ID
-        execSync(`screencapture -l ${targetWindow.id} "${tempFilePath}"`, { stdio: 'inherit' });
+        // Check if we're dealing with an app ID (from the fallback method)
+        const isAppId = targetWindow.id.startsWith('app_');
+        
+        if (isAppId) {
+          // For app IDs, we'll use the full screen capture as a fallback
+          // since we can't directly target the window
+          console.log(`Using full screen capture for ${targetWindow.owner.name}`);
+          execSync(`screencapture "${tempFilePath}"`, { stdio: 'inherit' });
+        } else {
+          // For real window IDs, use -l flag to capture specific window
+          console.log(`Using window ID capture for ${targetWindow.id}`);
+          execSync(`screencapture -l ${targetWindow.id} "${tempFilePath}"`, { stdio: 'inherit' });
+        }
         
         // Process the screenshot
         let processedBuffer = await fs.readFile(tempFilePath);
@@ -293,7 +244,7 @@ async function captureApplication(options = {}) {
 }
 
 /**
- * Lists all available windows that can be captured
+ * List all available windows
  * 
  * @returns {Promise<Array>} List of windows
  */
@@ -316,10 +267,10 @@ async function listWindows() {
  * Captures a specific region of the screen
  * 
  * @param {Object} options - Capture options
- * @param {number} options.x - X coordinate
- * @param {number} options.y - Y coordinate
- * @param {number} options.width - Width of region
- * @param {number} options.height - Height of region
+ * @param {number} options.x - X position
+ * @param {number} options.y - Y position
+ * @param {number} options.width - Width
+ * @param {number} options.height - Height
  * @param {string} options.format - Image format (png, jpg)
  * @param {number} options.quality - Image quality (1-100)
  * @param {boolean} options.saveToFile - Whether to save to file
@@ -331,24 +282,22 @@ async function captureRegion(options = {}) {
   const quality = options.quality || 100;
   const saveToFile = options.saveToFile !== undefined ? options.saveToFile : true;
   
-  // Validate options
   if (x === undefined || y === undefined || width === undefined || height === undefined) {
     throw new Error('Region coordinates (x, y, width, height) are required');
   }
   
   try {
-    const timestamp = new Date().toISOString();
-    const filename = `region_${x}_${y}_${width}_${height}_${timestamp.replace(/[:.]/g, '-')}.${format}`;
-    const filePath = saveToFile ? path.join(SCREENSHOT_DIR, filename) : null;
-    
-    // On macOS, use screencapture with the -R option
+    // On macOS, we'll use screencapture command directly for capturing a region
     if (process.platform === 'darwin') {
       try {
         // Create a temporary file path
         const tempFilePath = path.join(SCREENSHOT_DIR, `temp_${Date.now()}.png`);
+        const timestamp = new Date().toISOString();
+        const filename = `region_${x}_${y}_${width}_${height}_${timestamp.replace(/[:.]/g, '-')}.${format}`;
+        const filePath = saveToFile ? path.join(SCREENSHOT_DIR, filename) : null;
         
-        // Execute screencapture command to capture the specified region
-        // -R flag specifies the rectangle to capture (x,y,width,height)
+        // Execute screencapture command to capture a specific region
+        // -R flag specifies the region in the format x,y,width,height
         execSync(`screencapture -R${x},${y},${width},${height} "${tempFilePath}"`, { stdio: 'inherit' });
         
         // Process the screenshot
@@ -370,7 +319,6 @@ async function captureRegion(options = {}) {
         await fs.remove(tempFilePath);
         
         // Create screenshot metadata
-        const metadata = await sharp(processedBuffer).metadata();
         const screenshotData = {
           id: generateId(),
           timestamp,
@@ -378,8 +326,8 @@ async function captureRegion(options = {}) {
           region: { x, y, width, height },
           format,
           quality,
-          width: metadata.width,
-          height: metadata.height,
+          width,
+          height,
           filePath: filePath,
           base64: processedBuffer.toString('base64')
         };
@@ -393,16 +341,20 @@ async function captureRegion(options = {}) {
         throw new Error(`Failed to capture region using screencapture: ${error.message}`);
       }
     } else {
-      // Fallback for non-macOS platforms
-      // Capture full screen and crop region
-      const fullScreenBuffer = await screenshot();
+      // For other platforms, we'll use a different approach
+      // First capture the full screen, then crop the region
+      const fullScreenCapture = await captureFullScreen({ format: 'png', saveToFile: false });
       
-      // Crop the image
-      const processedBuffer = await sharp(fullScreenBuffer)
+      // Crop the region
+      const processedBuffer = await sharp(Buffer.from(fullScreenCapture.base64, 'base64'))
         .extract({ left: x, top: y, width, height })
-        .toFormat(format === 'jpg' ? 'jpeg' : format)
-        .jpeg({ quality: format === 'jpg' ? quality : 100 })
+        .toFormat(format === 'jpg' ? 'jpeg' : 'png')
+        .jpeg({ quality: quality })
         .toBuffer();
+      
+      const timestamp = new Date().toISOString();
+      const filename = `region_${x}_${y}_${width}_${height}_${timestamp.replace(/[:.]/g, '-')}.${format}`;
+      const filePath = saveToFile ? path.join(SCREENSHOT_DIR, filename) : null;
       
       // Save to file if requested
       if (saveToFile) {
@@ -435,9 +387,9 @@ async function captureRegion(options = {}) {
 }
 
 /**
- * Gets the latest screenshot from the history
+ * Get the latest screenshot from history
  * 
- * @returns {Object|null} The latest screenshot or null if none exists
+ * @returns {Object} Latest screenshot data
  */
 function getLatestScreenshot() {
   if (screenshotHistory.length === 0) {
@@ -448,45 +400,40 @@ function getLatestScreenshot() {
 }
 
 /**
- * Gets the screenshot history (most recent first)
+ * Get screenshot history
  * 
  * @param {number} limit - Maximum number of items to return
- * @returns {Array} Array of screenshot metadata
+ * @returns {Array} Screenshot history
  */
 function getScreenshotHistory(limit = 10) {
-  // Return at most 'limit' items, most recent first
-  return screenshotHistory
-    .slice(-limit)
+  // Create a copy of the array with most recent first
+  return [...screenshotHistory]
     .reverse()
+    .slice(0, limit)
     .map(item => ({
       id: item.id,
       timestamp: item.timestamp,
       type: item.type,
-      format: item.format,
+      filePath: item.filePath,
       width: item.width,
       height: item.height,
-      filePath: item.filePath
+      format: item.format
     }));
 }
 
 /**
- * Gets a screenshot by ID
- * 
- * @param {string} id - Screenshot ID
- * @returns {Object|null} Screenshot data or null if not found
+ * Get a screenshot by ID
  */
 function getScreenshotById(id) {
-  const screenshot = screenshotHistory.find(item => item.id === id);
-  return screenshot || null;
+  return screenshotHistory.find(screenshot => screenshot.id === id);
 }
 
 /**
- * Adds a screenshot to the history
- * 
+ * Add a screenshot to history
  * @param {Object} screenshot - Screenshot data
  */
 function addToHistory(screenshot) {
-  // Limit history size
+  // Limit history to 100 items
   if (screenshotHistory.length >= 100) {
     screenshotHistory.shift(); // Remove oldest
   }
@@ -495,7 +442,7 @@ function addToHistory(screenshot) {
 }
 
 /**
- * Generates a unique ID for screenshots
+ * Generate a unique ID for a screenshot
  */
 function generateId() {
   return `ss_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
